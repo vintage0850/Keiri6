@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>レシート管理アプリ（Webデモ）</title>
+
+  <!-- Tailwind CSS（見た目を整えるための仕組み。インストール不要） -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React（画面の部品を作るための仕組み）。CDNから読み込むのでインストール不要 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel：下のJSXコード（HTMLっぽいJS）をブラウザ内で変換するための仕組み -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Tesseract.js：画像の中の文字を読み取る（OCR）ための仕組み。インストール不要 -->
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <!-- Gemini APIキーの設定（任意）
+       gemini-config.js に書いておくと、毎回入力せずに済みます。
+       ※ gemini-config.js は .gitignore 対象なのでGitHubには上がりません。
+       ファイルが無くてもエラーにはならず、通常モードで動作します。 -->
+  <script src="gemini-config.js" onerror="console.log('gemini-config.js が見つかりません（未設定でも問題ありません）')"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    // =================================================================
+    // このファイルについて
+    // =================================================================
+    // ・これは「動作イメージを確認するためのデモ」です。
+    // ・データはこのブラウザのタブを閉じると消えます（保存されません）。
+    // ・SwiftUI版（ReceiptApp）と同じ考え方で作っています。
+    //   - 登録・変更・削除をすると「履歴」が自動で残る（電子帳簿保存法対応）
+    //   - 日付・金額・取引先で検索できる
+    //   - 普段の画面はシンプル（検索は折りたたみ）
+    // ・「レシートを撮影 / 画像を選ぶ」から写真を選ぶと、Tesseract.jsという
+    //   仕組みで画像内の文字を読み取り、日付・金額・お店の名前を自動入力します。
+    //   （文字の読み取りには数秒〜数十秒かかることがあり、インターネット接続が必要です）
+
+    // =================================================================
+    // 共通の色・見た目の設定（コンポーネントの共通化）
+    // =================================================================
+    // ボタンの色などはここでまとめて管理しています。
+    // 色を変えたい場合は、このオブジェクトの値だけ変えればOKです。
+    // （Next.js版に移行する際は tailwind.config.js の色設定に置き換える想定）
+    const theme = {
+      primaryButton: "bg-blue-600 hover:bg-blue-700 text-white",
+      secondaryButton: "bg-gray-100 hover:bg-gray-200 text-gray-700",
+      dangerButton: "bg-red-50 hover:bg-red-100 text-red-600",
+      cardBorder: "border border-gray-200",
+    };
+
+    // =================================================================
+    // ダミーデータ（最初から入っている記録）
+    // =================================================================
+    const initialReceipts = [
+      { id: "r1", date: "2026-06-01", amount: 1200, vendor: "コンビニA", memo: "事務用品" },
+      { id: "r2", date: "2026-06-03", amount: 5400, vendor: "〇〇文具店", memo: "" },
+      { id: "r3", date: "2026-06-10", amount: 880, vendor: "カフェB", memo: "打ち合わせ" },
+    ];
+
+    // 上記のダミーデータに対応する「登録履歴」
+    const initialHistoryLogs = [
+      { id: "h1", receiptId: "r1", changedAt: "2026-06-01T09:00:00", changeType: "登録", fieldName: null, oldValue: null, newValue: "登録内容：コンビニA / 1200円 / 2026/06/01" },
+      { id: "h2", receiptId: "r2", changedAt: "2026-06-03T10:30:00", changeType: "登録", fieldName: null, oldValue: null, newValue: "登録内容：〇〇文具店 / 5400円 / 2026/06/03" },
+      { id: "h3", receiptId: "r3", changedAt: "2026-06-10T13:15:00", changeType: "登録", fieldName: null, oldValue: null, newValue: "登録内容：カフェB / 880円 / 2026/06/10" },
+    ];
+
+    // 「レシートを撮影した」ことを再現するためのサンプル読み取り結果
+    // （実際の撮影・自動読み取りはSwiftUI版で行います。Webデモでは固定の候補を使います）
+    const sampleScans = [
+      { date: "2026-06-14", amount: 980, vendor: "スーパーマーケットC" },
+      { date: "2026-06-13", amount: 3200, vendor: "〇〇書店" },
+      { date: "2026-06-12", amount: 450, vendor: "コンビニD" },
+    ];
+
+    // =================================================================
+    // ユーティリティ関数
+    // =================================================================
+
+    /** "2026-06-01" → "2026/06/01" のような表示用の文字列に変換する */
+    function formatDate(dateStr) {
+      return dateStr.replaceAll("-", "/");
+    }
+
+    /** 金額を "¥1,200" のような表示用の文字列に変換する */
+    function formatYen(amount) {
+      return "¥" + Number(amount).toLocaleString();
+    }
+
+    /** 今の日時を履歴に記録するための文字列にする */
+    function nowString() {
+      return new Date().toISOString();
+    }
+
+    /**
+     * 検索条件に合うレシートだけを取り出す
+     * 【電子帳簿保存法：可視性の確保】
+     *  ① 取引年月日（開始日〜終了日）
+     *  ② 取引金額（以上〜以下）
+     *  ③ 取引先（部分一致）
+     */
+    function filterReceipts(receipts, filters) {
+      return receipts
+        .filter((r) => {
+          if (filters.startDate && r.date < filters.startDate) return false;
+          if (filters.endDate && r.date > filters.endDate) return false;
+          if (filters.minAmount !== "" && r.amount < Number(filters.minAmount)) return false;
+          if (filters.maxAmount !== "" && r.amount > Number(filters.maxAmount)) return false;
+          if (
+            filters.vendorKeyword &&
+            !r.vendor.toLowerCase().includes(filters.vendorKeyword.toLowerCase())
+          ) {
+            return false;
+          }
+          return true;
+        })
+        .sort((a, b) => (a.date < b.date ? 1 : -1)); // 新しい日付が上に来るようにする
+    }
+
+    /**
+     * 登録時の履歴を1件作る
+     * 【電子帳簿保存法：真実性の確保】
+     */
+    function makeCreatedLog(receipt) {
+      return {
+        id: "h" + Date.now(),
+        receiptId: receipt.id,
+        changedAt: nowString(),
+        changeType: "登録",
+        fieldName: null,
+        oldValue: null,
+        newValue: `登録内容：${receipt.vendor} / ${receipt.amount}円 / ${formatDate(receipt.date)}`,
+      };
+    }
+
+    /**
+     * 変更時の履歴を「変わった項目ごと」に作る
+     * 【電子帳簿保存法：真実性の確保】
+     * 日付・金額・取引先・メモのうち、実際に値が変わったものだけ履歴を作る
+     */
+    function makeUpdatedLogs(oldReceipt, newReceipt) {
+      const fields = [
+        { key: "date", label: "取引年月日", format: formatDate },
+        { key: "amount", label: "取引金額", format: (v) => `${v}円` },
+        { key: "vendor", label: "取引先", format: (v) => v },
+        { key: "memo", label: "メモ", format: (v) => v },
+      ];
+
+      const logs = [];
+      for (const field of fields) {
+        if (oldReceipt[field.key] !== newReceipt[field.key]) {
+          logs.push({
+            id: "h" + Date.now() + "_" + field.key,
+            receiptId: oldReceipt.id,
+            changedAt: nowString(),
+            changeType: "変更",
+            fieldName: field.label,
+            oldValue: field.format(oldReceipt[field.key]),
+            newValue: field.format(newReceipt[field.key]),
+          });
+        }
+      }
+      return logs;
+    }
+
+    /**
+     * 削除時の履歴を1件作る（削除前の内容を残す）
+     * 【電子帳簿保存法：真実性の確保】
+     */
+    function makeDeletedLog(receipt) {
+      return {
+        id: "h" + Date.now(),
+        receiptId: receipt.id,
+        changedAt: nowString(),
+        changeType: "削除",
+        fieldName: null,
+        oldValue: null,
+        newValue: `削除時点の内容：${receipt.vendor} / ${receipt.amount}円 / ${formatDate(receipt.date)}`,
+      };
+    }
+
+    // =================================================================
+    // OCR（自動文字認識）の読み取り結果から、項目を推測する関数
+    // 【SwiftUI版のReceiptOCRService.swiftと同じ考え方のロジック】
+    // - 読み取り結果はあくまで「候補」。間違っていても確認画面で直せます。
+    // =================================================================
+
+    /**
+     * 全角の数字や記号（０-９，．／－など）を半角に変換する
+     * レシートのレイアウトによっては日付や金額が全角で印字されることが多く、
+     * そのままでは数字として正規表現にマッチしないため、ここで統一する。
+     */
+    function normalizeFullWidthChars(text) {
+      return text.replace(/[！-～]/g, (ch) =>
+        String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+      );
+    }
+
+    /**
+     * 「合計」などのキーワードがある行を優先しつつ、金額らしき数字を探す
+     */
+    function extractAmountFromLines(lines) {
+      const pattern = /[¥￥]\s?([0-9][0-9,]{0,9})|([0-9][0-9,]{0,9})\s?円/g;
+
+      function amountsIn(text) {
+        const results = [];
+        let match;
+        pattern.lastIndex = 0; // グローバル正規表現は使い回すと位置がずれるためリセットする
+        while ((match = pattern.exec(text)) !== null) {
+          const numberString = (match[1] ?? match[2] ?? "").replace(/,/g, "");
+          if (numberString) results.push(Number(numberString));
+        }
+        return results;
+      }
+
+      const totalKeywords = ["合計", "総額", "お会計", "合計金額", "ご合計", "お買上"];
+      for (const line of lines) {
+        if (totalKeywords.some((keyword) => line.includes(keyword))) {
+          const amounts = amountsIn(line);
+          if (amounts.length > 0) return Math.max(...amounts);
+        }
+      }
+
+      const all = lines.flatMap(amountsIn);
+      return all.length > 0 ? Math.max(...all) : null;
+    }
+
+    /**
+     * 「2026年6月15日」「2026/06/15」「令和8年6月15日」のような表記から
+     * 日付（YYYY-MM-DD形式）を探す
+     *
+     * レシートでは全角数字や和暦（令和・平成・昭和）で印字されることが多いため、
+     * 呼び出し側で全角→半角変換（normalizeFullWidthChars）した行を渡すことを想定している。
+     */
+    function extractDateFromLines(lines) {
+      // 元号が西暦何年から始まるか（令和元年＝2019年 → 2018＋1）
+      const eraStartYears = { 令和: 2018, 平成: 1988, 昭和: 1925 };
+
+      // ※ 各正規表現には必ず g（グローバル）フラグを付ける。
+      //   1つの行に複数マッチする可能性がある場合に、最初の1件だけでなく
+      //   すべてを確認できるようにするため。
+      const patterns = [
+        // 令和8年6月15日 / 令和元年6月15日 のような和暦表記
+        {
+          regex: /(令和|平成|昭和)(元|\d{1,2})年\s?(\d{1,2})月\s?(\d{1,2})日/g,
+          toParts: (m) => {
+            const eraYear = m[2] === "元" ? 1 : Number(m[2]);
+            return [eraStartYears[m[1]] + eraYear, Number(m[3]), Number(m[4])];
+          },
+        },
+        // 2026年6月15日
+        {
+          regex: /(\d{4})年\s?(\d{1,2})月\s?(\d{1,2})日/g,
+          toParts: (m) => [Number(m[1]), Number(m[2]), Number(m[3])],
+        },
+        // 2026/06/15、2026-06-15、2026.06.15
+        {
+          regex: /(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/g,
+          toParts: (m) => [Number(m[1]), Number(m[2]), Number(m[3])],
+        },
+      ];
+
+      // 年・月・日として現実的にありえる範囲かどうかをチェックする
+      // 例：電話番号「0123-45-6789」が「0123年45月67日」のように
+      //     誤って日付として読み取られるのを防ぐ
+      function isPlausibleDate(year, month, day) {
+        return (
+          year >= 1900 && year <= 2100 &&
+          month >= 1 && month <= 12 &&
+          day >= 1 && day <= 31
+        );
+      }
+
+      for (const line of lines) {
+        for (const { regex, toParts } of patterns) {
+          for (const match of line.matchAll(regex)) {
+            const [year, month, day] = toParts(match);
+            if (isPlausibleDate(year, month, day)) {
+              return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            }
+          }
+        }
+      }
+      return null;
+    }
+
+    /**
+     * レシートの一番上に書かれている文字を「お店の名前」として推測する
+     * （数字・記号だけの行は電話番号などの可能性が高いため除外する）
+     */
+    function extractVendorFromLines(lines) {
+      for (const line of lines) {
+        if (line && /[\p{L}]/u.test(line)) {
+          return line;
+        }
+      }
+      return null;
+    }
+
+    // =================================================================
+    // Gemini API（試験運用）を使った読み取り
+    // - ユーザー自身のAPIキーを使って、画像から直接「日付・金額・店名」を
+    //   JSON形式で読み取ってもらう。
+    // - Tesseract.jsより読み取り精度が高くなることが期待できるが、
+    //   APIキー・通信費が必要になるため「お試し用」の機能とする。
+    // - ※注意：このAPIキーはブラウザから直接送信される。デモ用の一時利用に
+    //   限り、第三者と共有したり公開ページに残したりしないこと。
+    // =================================================================
+
+    // 使用するGemini APIのモデル名（候補）
+    // Google側の提供状況により、古いモデルが使えなくなることがあるため、
+    // 上から順に試し、「モデルが見つからない（404）」場合は次の候補を試す。
+    // 将来また使えなくなった場合は、この配列の先頭に新しいモデル名を追加すればよい。
+    const GEMINI_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+
+    // Geminiに送る指示文（日本語のレシートを想定）
+    const GEMINI_PROMPT = `これは日本のレシート（領収書）の画像です。
+次の3項目を読み取り、指定したJSON形式だけで回答してください。
+- date: 取引年月日。"YYYY-MM-DD" 形式の文字列。和暦（令和・平成など）の場合は西暦に変換すること。読み取れない場合は null。
+- amount: 合計金額（税込の最終的な支払金額）。数字のみの整数。読み取れない場合は null。
+- vendor: お店・会社名の文字列。読み取れない場合は null。`;
+
+    /**
+     * 画像ファイルを、Gemini APIに送るためのBase64文字列に変換する
+     */
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = String(reader.result);
+          const base64Data = dataUrl.split(",")[1] || "";
+          resolve({ mimeType: file.type || "image/jpeg", data: base64Data });
+        };
+        reader.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    /**
+     * Gemini APIに画像を送り、日付・金額・店名をJSONで読み取ってもらう
+     * 戻り値：{ raw: 生のレスポンス文字列, parsed: { date, amount, vendor } }
+     */
+    async function recognizeWithGemini(file, apiKey) {
+      const { mimeType, data } = await fileToBase64(file);
+
+      const requestBody = {
+        contents: [
+          {
+            parts: [
+              { text: GEMINI_PROMPT },
+              { inline_data: { mime_type: mimeType, data } },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              date: { type: "STRING", nullable: true },
+              amount: { type: "INTEGER", nullable: true },
+              vendor: { type: "STRING", nullable: true },
+            },
+          },
+        },
+      };
+
+      // 候補のモデルを上から順に試す。「モデルが見つからない（404）」場合のみ、
+      // 次の候補に切り替える（それ以外のエラーは、その場で呼び出し元に伝える）。
+      let lastError = null;
+      for (const model of GEMINI_MODEL_CANDIDATES) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (response.ok) {
+          const json = await response.json();
+          const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!text) {
+            throw new Error("Gemini APIから読み取り結果を取得できませんでした");
+          }
+          return { raw: text, parsed: JSON.parse(text) };
+        }
+
+        const errorBody = await response.text();
+        lastError = new Error(`Gemini APIエラー（${response.status}）: ${errorBody.slice(0, 200)}`);
+        if (response.status !== 404) {
+          throw lastError;
+        }
+        // 404（モデルが見つからない／廃止済み）の場合は、次の候補を試す
+      }
+
+      throw lastError;
+    }
+
+    // =================================================================
+    // 画面上部：タイトルと「レシートを追加」ボタン
+    // =================================================================
+    function Header({ onAddClick }) {
+      return (
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-white sticky top-0 z-10">
+          <h1 className="text-lg font-bold">経費一覧</h1>
+          <button
+            onClick={onAddClick}
+            className={`px-3 py-2 rounded-lg text-sm font-medium ${theme.primaryButton}`}
+          >
+            📷 レシートを追加
+          </button>
+        </div>
+      );
+    }
+
+    // =================================================================
+    // 絞り込み検索エリア（折りたたみ式）
+    // 【電子帳簿保存法：可視性の確保 ／ UIのシンプル化】
+    // =================================================================
+    function FilterArea({ filters, onChange }) {
+      const [isOpen, setIsOpen] = useState(false);
+
+      // 入力値を1つだけ更新するためのヘルパー
+      function update(key, value) {
+        onChange({ ...filters, [key]: value });
+      }
+
+      function clearFilters() {
+        onChange({ startDate: "", endDate: "", minAmount: "", maxAmount: "", vendorKeyword: "" });
+      }
+
+      return (
+        <div className="bg-gray-50 border-b border-gray-200">
+          <button
+            className="w-full text-left px-4 py-3 text-sm font-medium text-gray-700 flex justify-between items-center"
+            onClick={() => setIsOpen(!isOpen)}
+          >
+            <span>絞り込み検索</span>
+            <span className="text-gray-400">{isOpen ? "閉じる ▲" : "開く ▼"}</span>
+          </button>
+
+          {isOpen && (
+            <div className="px-4 pb-4 space-y-4">
+              {/* ① 取引年月日（開始日〜終了日） */}
+              <div>
+                <p className="text-xs text-gray-500 mb-1">取引年月日で絞り込む</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={filters.startDate}
+                    onChange={(e) => update("startDate", e.target.value)}
+                    className="border rounded px-2 py-1 text-sm flex-1"
+                  />
+                  <span className="text-gray-400">〜</span>
+                  <input
+                    type="date"
+                    value={filters.endDate}
+                    onChange={(e) => update("endDate", e.target.value)}
+                    className="border rounded px-2 py-1 text-sm flex-1"
+                  />
+                </div>
+              </div>
+
+              {/* ② 取引金額（以上〜以下） */}
+              <div>
+                <p className="text-xs text-gray-500 mb-1">取引金額で絞り込む</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    placeholder="下限"
+                    value={filters.minAmount}
+                    onChange={(e) => update("minAmount", e.target.value)}
+                    className="border rounded px-2 py-1 text-sm flex-1"
+                  />
+                  <span className="text-gray-400">円 〜</span>
+                  <input
+                    type="number"
+                    placeholder="上限"
+                    value={filters.maxAmount}
+                    onChange={(e) => update("maxAmount", e.target.value)}
+                    className="border rounded px-2 py-1 text-sm flex-1"
+                  />
+                  <span className="text-gray-400">円</span>
+                </div>
+              </div>
+
+              {/* ③ 取引先（部分一致） */}
+              <div>
+                <p className="text-xs text-gray-500 mb-1">取引先で絞り込む</p>
+                <input
+                  type="text"
+                  placeholder="取引先名の一部を入力"
+                  value={filters.vendorKeyword}
+                  onChange={(e) => update("vendorKeyword", e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full"
+                />
+              </div>
+
+              <button onClick={clearFilters} className="text-xs text-gray-500 underline">
+                検索条件をクリア
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // =================================================================
+    // レシート一覧の1行分
+    // =================================================================
+    function ReceiptRow({ receipt, onClick }) {
+      return (
+        <button
+          onClick={onClick}
+          className={`w-full flex items-center justify-between px-4 py-3 bg-white ${theme.cardBorder} border-b text-left hover:bg-gray-50`}
+        >
+          <div>
+            <p className="font-medium">{receipt.vendor}</p>
+            <p className="text-xs text-gray-400">{formatDate(receipt.date)}</p>
+          </div>
+          <p className="font-bold">{formatYen(receipt.amount)}</p>
+        </button>
+      );
+    }
+
+    // =================================================================
+    // 記録の詳細・変更履歴・編集・削除を行うモーダル
+    // 【電子帳簿保存法：真実性の確保】
+    // - 履歴一覧には「編集」「削除」ボタンを置いていません（表示のみ）
+    // =================================================================
+    function ReceiptDetailModal({ receipt, historyLogs, onClose, onUpdate, onDelete }) {
+      const [date, setDate] = useState(receipt.date);
+      const [amount, setAmount] = useState(String(receipt.amount));
+      const [vendor, setVendor] = useState(receipt.vendor);
+      const [memo, setMemo] = useState(receipt.memo);
+
+      function handleSave() {
+        onUpdate(receipt.id, {
+          date,
+          amount: Number(amount) || 0,
+          vendor: vendor.trim(),
+          memo,
+        });
+      }
+
+      function handleDelete() {
+        if (window.confirm("この記録を削除しますか？\n削除した内容は履歴に残ります。")) {
+          onDelete(receipt.id);
+        }
+      }
+
+      return (
+        <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
+          <div className="bg-white rounded-t-xl sm:rounded-xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h2 className="font-bold">記録の詳細</h2>
+              <button onClick={onClose} className="text-gray-400 text-xl leading-none">
+                ×
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3">
+              {/* 編集フォーム */}
+              <div>
+                <label className="text-xs text-gray-500">取引年月日</label>
+                <input
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">取引金額（円）</label>
+                <input
+                  type="number"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">取引先</label>
+                <input
+                  type="text"
+                  value={vendor}
+                  onChange={(e) => setVendor(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">メモ（任意）</label>
+                <input
+                  type="text"
+                  value={memo}
+                  onChange={(e) => setMemo(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={handleSave}
+                  disabled={vendor.trim() === ""}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium ${theme.primaryButton} disabled:opacity-40`}
+                >
+                  保存
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium ${theme.dangerButton}`}
+                >
+                  削除
+                </button>
+              </div>
+
+              {/* 変更履歴（読み取り専用） */}
+              <div className="pt-4 border-t mt-4">
+                <p className="text-sm font-medium mb-2">変更履歴（編集・削除はできません）</p>
+                {historyLogs.length === 0 ? (
+                  <p className="text-xs text-gray-400">履歴はまだありません</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {historyLogs.map((log) => (
+                      <li key={log.id} className="text-xs bg-gray-50 rounded p-2">
+                        <div className="flex items-center gap-2 text-gray-500">
+                          <span className="px-2 py-0.5 bg-gray-200 rounded-full">{log.changeType}</span>
+                          <span>{new Date(log.changedAt).toLocaleString("ja-JP")}</span>
+                        </div>
+                        <p className="mt-1">
+                          {log.fieldName
+                            ? `${log.fieldName}：「${log.oldValue}」→「${log.newValue}」`
+                            : log.newValue}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =================================================================
+    // 「レシートを追加」モーダル
+    // 撮影 → 自動読み取り → 確認 → 保存 の流れを再現
+    // - 写真を選ぶと、Tesseract.js（OCR）で実際に画像から文字を読み取る
+    // - 写真が無い場合は「サンプルで試す」で動作確認できる
+    // =================================================================
+    function AddReceiptModal({ onClose, onSave }) {
+      const [isScanning, setIsScanning] = useState(false);
+      const [ocrStatus, setOcrStatus] = useState("");
+      const [imagePreview, setImagePreview] = useState(null);
+      const [date, setDate] = useState("");
+      const [amount, setAmount] = useState("");
+      const [vendor, setVendor] = useState("");
+      const [memo, setMemo] = useState("");
+      const [recognizedLines, setRecognizedLines] = useState([]);
+
+      // Gemini API（試験運用）の利用設定
+      // - gemini-config.js に事前にキーを書いておくと、それが初期値として使われる
+      // - 手入力した場合は「このタブを開いている間だけ」ブラウザに保存する（sessionStorage）
+      const preconfiguredGeminiKey = (typeof window !== "undefined" && window.GEMINI_API_KEY) || "";
+      const [useGemini, setUseGemini] = useState(() => Boolean(preconfiguredGeminiKey));
+      const [geminiApiKey, setGeminiApiKey] = useState(
+        () => sessionStorage.getItem("gemini_api_key_demo") || preconfiguredGeminiKey
+      );
+
+      function handleGeminiApiKeyChange(value) {
+        setGeminiApiKey(value);
+        sessionStorage.setItem("gemini_api_key_demo", value);
+      }
+
+      // 撮影 or 画像選択された写真を読み取り、日付・金額・取引先を自動入力する
+      async function handlePhotoSelected(e) {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+
+        setImagePreview(URL.createObjectURL(file));
+        setIsScanning(true);
+        setRecognizedLines([]);
+        setOcrStatus("読み取りの準備をしています…");
+
+        // 「Gemini APIで読み取る」が有効＋APIキーが入力されている場合はGeminiを使う
+        if (useGemini && geminiApiKey) {
+          try {
+            setOcrStatus("Gemini APIで読み取り中…（数秒かかります）");
+            const { raw, parsed } = await recognizeWithGemini(file, geminiApiKey);
+            setRecognizedLines([raw]);
+
+            if (parsed.date) setDate(parsed.date);
+            if (parsed.amount !== null && parsed.amount !== undefined) {
+              setAmount(String(parsed.amount));
+            }
+            if (parsed.vendor) setVendor(parsed.vendor);
+
+            setOcrStatus(
+              parsed.date
+                ? "読み取りが完了しました。内容を確認してください。"
+                : "読み取りは完了しましたが、日付が見つかりませんでした。内容を確認してください。"
+            );
+          } catch (error) {
+            console.error(error);
+            setOcrStatus(`Gemini APIでの読み取りに失敗しました（${error.message}）。手入力してください。`);
+          } finally {
+            setIsScanning(false);
+          }
+          return;
+        }
+
+        // Tesseract.jsの読み込みに失敗した場合（インターネット未接続など）
+        if (typeof Tesseract === "undefined") {
+          setOcrStatus("文字認識の機能を読み込めませんでした。インターネット接続をご確認のうえ、手入力してください。");
+          setIsScanning(false);
+          return;
+        }
+
+        try {
+          // 画像から文字を読み取る（日本語＋英数字）
+          const { data } = await Tesseract.recognize(file, "jpn+eng", {
+            logger: (m) => {
+              if (m.status === "recognizing text") {
+                setOcrStatus(`文字を読み取り中…（${Math.round(m.progress * 100)}%）`);
+              } else if (m.status) {
+                setOcrStatus(m.status);
+              }
+            },
+          });
+
+          // 読み取った文章を行ごとに分け、空行を取り除く
+          // ＋ 全角数字（０-９）を半角に変換しておく（日付・金額の読み取り精度を上げるため）
+          const lines = data.text
+            .split("\n")
+            .map((line) => normalizeFullWidthChars(line.trim()))
+            .filter((line) => line.length > 0);
+
+          setRecognizedLines(lines);
+
+          const foundDate = extractDateFromLines(lines);
+          const foundAmount = extractAmountFromLines(lines);
+          const foundVendor = extractVendorFromLines(lines);
+
+          if (foundDate) setDate(foundDate);
+          if (foundAmount !== null) setAmount(String(foundAmount));
+          if (foundVendor) setVendor(foundVendor);
+
+          if (foundDate) {
+            setOcrStatus("読み取りが完了しました。内容を確認してください。");
+          } else {
+            setOcrStatus(
+              "読み取りは完了しましたが、日付が見つかりませんでした。下の「読み取った文字」を確認して、日付欄を手入力してください。"
+            );
+          }
+        } catch (error) {
+          console.error(error);
+          setOcrStatus("読み取りに失敗しました。手入力で入れてください。");
+        } finally {
+          setIsScanning(false);
+        }
+      }
+
+      // 写真が無いときに、サンプルの読み取り結果を反映する（動作確認用）
+      function handleUseSample() {
+        setIsScanning(true);
+        setOcrStatus("サンプルデータを読み込み中…");
+        setImagePreview(null);
+        setTimeout(() => {
+          const sample = sampleScans[Math.floor(Math.random() * sampleScans.length)];
+          setDate(sample.date);
+          setAmount(String(sample.amount));
+          setVendor(sample.vendor);
+          setOcrStatus("");
+          setIsScanning(false);
+        }, 400);
+      }
+
+      function handleSave() {
+        onSave({
+          date: date || new Date().toISOString().slice(0, 10),
+          amount: Number(amount) || 0,
+          vendor: vendor.trim(),
+          memo,
+        });
+      }
+
+      return (
+        <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
+          <div className="bg-white rounded-t-xl sm:rounded-xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h2 className="font-bold">レシートを追加</h2>
+              <button onClick={onClose} className="text-gray-400 text-xl leading-none">
+                ×
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3">
+              {/* Gemini API（試験運用）の利用設定
+                  ※ gemini-config.js にキーが設定されている場合のみ表示する。
+                     お客様に共有する版（キー未設定）では、この項目自体が
+                     表示されず、これまでと同じシンプルな画面になる。 */}
+              {preconfiguredGeminiKey && (
+                <div className="border rounded-lg p-3 bg-gray-50 space-y-2">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="checkbox"
+                      checked={useGemini}
+                      onChange={(e) => setUseGemini(e.target.checked)}
+                    />
+                    Gemini APIで読み取る（高精度・お試し用）
+                  </label>
+                  {useGemini && (
+                    <div>
+                      <input
+                        type="password"
+                        value={geminiApiKey}
+                        onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
+                        placeholder="Gemini APIキーを入力"
+                        className="border rounded px-2 py-1 text-sm w-full"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        ※ gemini-config.js に設定済みのキーを使用しています。変更するとこのタブの間だけ上書きされます。
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 撮影・画像選択ボタン（スマホではカメラが開く） */}
+              <label
+                htmlFor="receipt-photo-input"
+                className={`block text-center w-full py-3 rounded-lg text-sm font-medium cursor-pointer ${theme.secondaryButton}`}
+              >
+                📷 レシートを撮影 / 画像を選ぶ
+              </label>
+              <input
+                id="receipt-photo-input"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={handlePhotoSelected}
+                className="hidden"
+              />
+
+              {/* 選んだ画像のプレビュー */}
+              {imagePreview && (
+                <img
+                  src={imagePreview}
+                  alt="撮影したレシート"
+                  className="w-full max-h-48 object-contain rounded-lg border bg-gray-50"
+                />
+              )}
+
+              {/* 読み取り状況の表示 */}
+              {ocrStatus && (
+                <p className="text-xs text-blue-600 text-center">{ocrStatus}</p>
+              )}
+
+              {/* 読み取った文字をそのまま確認できる（うまく自動入力されない時の確認用） */}
+              {recognizedLines.length > 0 && (
+                <details className="text-xs text-gray-500">
+                  <summary className="cursor-pointer select-none">
+                    読み取った文字を確認する（うまく入力されない場合）
+                  </summary>
+                  <pre className="mt-1 p-2 bg-gray-50 border rounded whitespace-pre-wrap break-words">
+                    {recognizedLines.join("\n")}
+                  </pre>
+                </details>
+              )}
+
+              {/* 写真が無いときのサンプル動作確認 */}
+              <button onClick={handleUseSample} className="w-full text-xs text-gray-400 underline">
+                （写真がない場合）サンプルデータで試す
+              </button>
+
+              <p className="text-xs text-gray-400">
+                読み取られた内容は下で確認・修正できます。
+              </p>
+
+              <div>
+                <label className="text-xs text-gray-500">取引年月日</label>
+                <input
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">取引金額（円）</label>
+                <input
+                  type="number"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">取引先</label>
+                <input
+                  type="text"
+                  value={vendor}
+                  onChange={(e) => setVendor(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                  placeholder="お店・会社の名前"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">メモ（任意）</label>
+                <input
+                  type="text"
+                  value={memo}
+                  onChange={(e) => setMemo(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm w-full mt-1"
+                />
+              </div>
+
+              <button
+                onClick={handleSave}
+                disabled={vendor.trim() === ""}
+                className={`w-full py-2 rounded-lg text-sm font-medium ${theme.primaryButton} disabled:opacity-40`}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =================================================================
+    // 画面全体（一覧画面）
+    // =================================================================
+    function App() {
+      const [receipts, setReceipts] = useState(initialReceipts);
+      const [historyLogs, setHistoryLogs] = useState(initialHistoryLogs);
+      const [filters, setFilters] = useState({
+        startDate: "",
+        endDate: "",
+        minAmount: "",
+        maxAmount: "",
+        vendorKeyword: "",
+      });
+      const [selectedId, setSelectedId] = useState(null);
+      const [isAddOpen, setIsAddOpen] = useState(false);
+
+      // 絞り込み後の一覧（検索条件 or データが変わったときだけ計算する）
+      const filteredReceipts = useMemo(
+        () => filterReceipts(receipts, filters),
+        [receipts, filters]
+      );
+
+      const selectedReceipt = receipts.find((r) => r.id === selectedId) || null;
+      const selectedHistory = useMemo(
+        () =>
+          historyLogs
+            .filter((h) => h.receiptId === selectedId)
+            .sort((a, b) => (a.changedAt > b.changedAt ? 1 : -1)),
+        [historyLogs, selectedId]
+      );
+
+      // 新しいレシートを登録する（履歴も自動で追加）
+      function handleAddReceipt(data) {
+        const receipt = { id: "r" + Date.now(), ...data };
+        setReceipts((prev) => [receipt, ...prev]);
+        setHistoryLogs((prev) => [...prev, makeCreatedLog(receipt)]);
+        setIsAddOpen(false);
+      }
+
+      // 既存のレシートを更新する（変わった項目だけ履歴に追加）
+      function handleUpdateReceipt(id, newData) {
+        const old = receipts.find((r) => r.id === id);
+        const updated = { ...old, ...newData };
+        const logs = makeUpdatedLogs(old, updated);
+        if (logs.length > 0) {
+          setHistoryLogs((prev) => [...prev, ...logs]);
+        }
+        setReceipts((prev) => prev.map((r) => (r.id === id ? updated : r)));
+        setSelectedId(null);
+      }
+
+      // レシートを削除する（削除前の内容を履歴に残す）
+      function handleDeleteReceipt(id) {
+        const target = receipts.find((r) => r.id === id);
+        setHistoryLogs((prev) => [...prev, makeDeletedLog(target)]);
+        setReceipts((prev) => prev.filter((r) => r.id !== id));
+        setSelectedId(null);
+      }
+
+      return (
+        <div className="max-w-md mx-auto min-h-screen bg-white shadow-sm">
+          <Header onAddClick={() => setIsAddOpen(true)} />
+          <FilterArea filters={filters} onChange={setFilters} />
+
+          {/* レシート一覧 */}
+          {filteredReceipts.length === 0 ? (
+            <p className="text-center text-sm text-gray-400 py-10">
+              該当する記録がありません
+            </p>
+          ) : (
+            <div>
+              {filteredReceipts.map((r) => (
+                <ReceiptRow key={r.id} receipt={r} onClick={() => setSelectedId(r.id)} />
+              ))}
+            </div>
+          )}
+
+          {/* 詳細・履歴モーダル */}
+          {selectedReceipt && (
+            <ReceiptDetailModal
+              receipt={selectedReceipt}
+              historyLogs={selectedHistory}
+              onClose={() => setSelectedId(null)}
+              onUpdate={handleUpdateReceipt}
+              onDelete={handleDeleteReceipt}
+            />
+          )}
+
+          {/* 追加モーダル */}
+          {isAddOpen && (
+            <AddReceiptModal onClose={() => setIsAddOpen(false)} onSave={handleAddReceipt} />
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
