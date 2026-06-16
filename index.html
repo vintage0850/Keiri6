@@ -35,7 +35,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useMemo, useEffect } = React;
+    const { useState, useMemo, useEffect, useRef } = React;
 
     // =================================================================
     // このファイルについて
@@ -498,10 +498,128 @@
     }
 
     // =================================================================
+    // カメラのライブプレビューと撮影コンポーネント
+    // - getUserMedia API でカメラへのアクセス権限をブラウザが要求する
+    // - 許可されると背面カメラのライブ映像が表示され、撮影ボタンで静止画を取得する
+    // - 許可が拒否された場合や非対応ブラウザの場合はエラーメッセージを表示する
+    // =================================================================
+    function CameraView({ onCapture, onClose }) {
+      const videoRef = useRef(null);
+      // streamをrefで管理する（クリーンアップ時に確実にカメラを停止するため）
+      const streamRef = useRef(null);
+      const [cameraError, setCameraError] = useState("");
+
+      useEffect(() => {
+        // getUserMedia に対応しているか確認する（Safari 11未満などでは非対応）
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setCameraError("このブラウザはカメラ機能に対応していません。「画像を選ぶ」をご利用ください。");
+          return;
+        }
+
+        // カメラへのアクセス権限を要求する（背面カメラを優先）
+        navigator.mediaDevices
+          .getUserMedia({ video: { facingMode: "environment" } })
+          .then((mediaStream) => {
+            streamRef.current = mediaStream;
+            if (videoRef.current) {
+              videoRef.current.srcObject = mediaStream;
+            }
+          })
+          .catch((err) => {
+            // 権限を拒否された場合
+            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+              setCameraError("カメラへのアクセスが許可されませんでした。Safariの設定からカメラを許可してください。");
+            } else {
+              setCameraError("カメラを開けませんでした。「画像を選ぶ」からレシートの写真を選んでください。");
+            }
+          });
+
+        // コンポーネントが閉じられたときにカメラを停止する
+        return () => {
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach((track) => track.stop());
+          }
+        };
+      }, []);
+
+      // カメラを止める共通処理
+      function stopCamera() {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+        }
+      }
+
+      // 撮影ボタンが押されたとき：映像の現在フレームを静止画として取り出す
+      function handleCapture() {
+        if (!videoRef.current) return;
+        const canvas = document.createElement("canvas");
+        canvas.width = videoRef.current.videoWidth;
+        canvas.height = videoRef.current.videoHeight;
+        canvas.getContext("2d").drawImage(videoRef.current, 0, 0);
+        stopCamera();
+        // canvas の内容を JPEG ファイルとして Claude AI に渡す
+        canvas.toBlob(
+          (blob) => {
+            const file = new File([blob], "receipt.jpg", { type: "image/jpeg" });
+            onCapture(file);
+          },
+          "image/jpeg",
+          0.9
+        );
+      }
+
+      function handleClose() {
+        stopCamera();
+        onClose();
+      }
+
+      // カメラエラー時の表示
+      if (cameraError) {
+        return (
+          <div className="space-y-2">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-xs text-red-600">{cameraError}</p>
+            </div>
+            <button onClick={onClose} className="w-full text-xs text-gray-400 underline">
+              閉じる
+            </button>
+          </div>
+        );
+      }
+
+      // ライブカメラ表示
+      return (
+        <div className="space-y-2">
+          <p className="text-xs text-gray-500 text-center">レシートにカメラを向けて撮影ボタンを押してください</p>
+          <div className="relative bg-black rounded-lg overflow-hidden" style={{ height: "240px" }}>
+            {/* playsInline はiOSのSafariでフルスクリーンにならないために必須 */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+            {/* 撮影ボタン（白丸・画面下部中央） */}
+            <button
+              onClick={handleCapture}
+              className="absolute bottom-4 left-1/2 -translate-x-1/2 w-14 h-14 rounded-full bg-white border-4 border-blue-600 shadow-lg active:scale-95"
+              aria-label="撮影する"
+            />
+          </div>
+          <button onClick={handleClose} className="w-full text-xs text-gray-400 underline">
+            キャンセル（カメラを閉じる）
+          </button>
+        </div>
+      );
+    }
+
+    // =================================================================
     // 「レシートを追加」モーダル
     // 撮影 → 自動読み取り → 確認 → 保存 の流れを再現
-    // - 写真を選ぶと、Claude AI がレシートの内容を読み取って自動入力する
-    // - 写真が無い場合は「サンプルで試す」で動作確認できる
+    // - 「カメラで撮影」：権限ダイアログ → ライブプレビュー → 撮影
+    // - 「画像を選ぶ」：端末内の写真ファイルを選択
+    // - どちらも Claude AI で日付・金額・店名を自動入力する
     // =================================================================
     function AddReceiptModal({ onClose, onSave }) {
       const [isScanning, setIsScanning] = useState(false);
@@ -512,6 +630,7 @@
       const [vendor, setVendor] = useState("");
       const [memo, setMemo] = useState("");
       const [recognizedLines, setRecognizedLines] = useState([]);
+      const [showCamera, setShowCamera] = useState(false);
 
       // iOSのSafariでモーダルを開いている間、背景がスクロールしないようにする
       useEffect(() => {
@@ -525,17 +644,14 @@
         };
       }, []);
 
-      // 撮影 or 画像選択された写真を Claude AI で読み取り、日付・金額・取引先を自動入力する
-      async function handlePhotoSelected(e) {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
-
+      // 画像ファイルを受け取り Claude AI で読み取る（カメラ・ファイル選択の両方から呼ばれる共通処理）
+      async function processFile(file) {
         setImagePreview(URL.createObjectURL(file));
+        setShowCamera(false);
         setIsScanning(true);
         setRecognizedLines([]);
         setOcrStatus("読み取りの準備をしています…");
 
-        // Claude AI（中継サーバー経由）で読み取る
         try {
           setOcrStatus("Claude AI で読み取り中…（数秒かかります）");
           const { raw, parsed } = await recognizeWithClaude(file);
@@ -558,6 +674,18 @@
         } finally {
           setIsScanning(false);
         }
+      }
+
+      // CameraView で撮影した画像を受け取る
+      function handleCameraCapture(file) {
+        processFile(file);
+      }
+
+      // ファイル選択で選んだ画像を受け取る
+      function handlePhotoSelected(e) {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        processFile(file);
       }
 
       // 写真が無いときに、サンプルの読み取り結果を反映する（動作確認用）
@@ -603,20 +731,37 @@
                 </p>
               </div>
 
-              {/* 撮影・画像選択ボタン（スマホではカメラが開く） */}
-              <label
-                htmlFor="receipt-photo-input"
-                className={`block text-center w-full py-3 rounded-lg text-sm font-medium cursor-pointer ${theme.secondaryButton}`}
-              >
-                📷 レシートを撮影 / 画像を選ぶ
-              </label>
-              <input
-                id="receipt-photo-input"
-                type="file"
-                accept="image/*"
-                onChange={handlePhotoSelected}
-                className="hidden"
-              />
+              {/* カメラ撮影 or ファイル選択 */}
+              {showCamera ? (
+                <CameraView
+                  onCapture={handleCameraCapture}
+                  onClose={() => setShowCamera(false)}
+                />
+              ) : (
+                <>
+                  {/* カメラで撮影：権限ダイアログを出してライブ映像を表示する */}
+                  <button
+                    onClick={() => setShowCamera(true)}
+                    className={`w-full py-3 rounded-lg text-sm font-medium ${theme.secondaryButton}`}
+                  >
+                    📷 カメラで撮影
+                  </button>
+                  {/* 画像を選ぶ：端末内の写真ファイルを選択する */}
+                  <label
+                    htmlFor="receipt-photo-input"
+                    className={`block text-center w-full py-3 rounded-lg text-sm font-medium cursor-pointer ${theme.secondaryButton}`}
+                  >
+                    🖼 画像ファイルを選ぶ
+                  </label>
+                  <input
+                    id="receipt-photo-input"
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoSelected}
+                    className="hidden"
+                  />
+                </>
+              )}
 
               {/* 選んだ画像のプレビュー */}
               {imagePreview && (
