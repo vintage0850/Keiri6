@@ -717,7 +717,8 @@
       // - gemini-config.js に事前にキーを書いておくと、それが初期値として使われる
       // - 手入力した場合は「このタブを開いている間だけ」ブラウザに保存する（sessionStorage）
       const preconfiguredGeminiKey = (typeof window !== "undefined" && window.GEMINI_API_KEY) || "";
-      const [useGemini, setUseGemini] = useState(() => Boolean(preconfiguredGeminiKey));
+      // 公開デモでは中継サーバー経由でGeminiが使えるため、デフォルトでONにする
+      const [useGemini, setUseGemini] = useState(true);
       const [geminiApiKey, setGeminiApiKey] = useState(
         () => sessionStorage.getItem("gemini_api_key_demo") || preconfiguredGeminiKey
       );
@@ -737,8 +738,9 @@
         setRecognizedLines([]);
         setOcrStatus("読み取りの準備をしています…");
 
-        // 「Gemini APIで読み取る」が有効＋APIキーが入力されている場合はGeminiを使う
-        if (useGemini && geminiApiKey) {
+        // 「Gemini APIで読み取る」が有効な場合はGeminiを使う
+        // geminiApiKey が空の場合は中継サーバー（/api/gemini）経由で呼び出す
+        if (useGemini) {
           try {
             setOcrStatus("Gemini APIで読み取り中…（数秒かかります）");
             const { raw, parsed } = await recognizeWithGemini(file, geminiApiKey);
