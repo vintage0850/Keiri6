@@ -16,10 +16,11 @@
   <!-- Tesseract.js：画像の中の文字を読み取る（OCR）ための仕組み。インストール不要 -->
   <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 
-  <!-- Gemini APIキーの設定（任意）
-       gemini-config.js に書いておくと、毎回入力せずに済みます。
+  <!-- Gemini APIキーの設定（任意・ローカル動作確認用）
+       gemini-config.js に書いておくと、ブラウザから直接Gemini APIを呼び出します。
        ※ gemini-config.js は .gitignore 対象なのでGitHubには上がりません。
-       ファイルが無くてもエラーにはならず、通常モードで動作します。 -->
+       ファイルが無くてもエラーにはならず、中継サーバー（/api/gemini）経由の
+       モードで動作します（Vercelにデプロイした場合）。 -->
   <script src="gemini-config.js" onerror="console.log('gemini-config.js が見つかりません（未設定でも問題ありません）')"></script>
 </head>
 <body class="bg-gray-100">
@@ -304,12 +305,19 @@
 
     // =================================================================
     // Gemini API（試験運用）を使った読み取り
-    // - ユーザー自身のAPIキーを使って、画像から直接「日付・金額・店名」を
-    //   JSON形式で読み取ってもらう。
+    // - 画像から直接「日付・金額・店名」をJSON形式で読み取ってもらう。
     // - Tesseract.jsより読み取り精度が高くなることが期待できるが、
     //   APIキー・通信費が必要になるため「お試し用」の機能とする。
-    // - ※注意：このAPIキーはブラウザから直接送信される。デモ用の一時利用に
-    //   限り、第三者と共有したり公開ページに残したりしないこと。
+    //
+    // 呼び出し方法は2種類あり、recognizeWithGemini が自動で切り分ける。
+    // 1. ローカル動作確認用（gemini-config.js にAPIキーを設定した場合）
+    //    → ブラウザから直接Gemini APIを呼び出す（recognizeWithGeminiDirect）
+    //    ※注意：このAPIキーはブラウザから直接送信される。デモ用の一時利用に
+    //      限り、第三者と共有したり公開ページに残したりしないこと。
+    // 2. 公開デモ用（APIキーを設定していない場合）
+    //    → 中継サーバー（/api/gemini）経由でGemini APIを呼び出す
+    //      （recognizeWithGeminiProxy）。APIキーはサーバー側（Vercelの
+    //      環境変数）で管理されるため、ブラウザには一切渡らない。
     // =================================================================
 
     // 使用するGemini APIのモデル名（候補）
@@ -344,11 +352,24 @@
     /**
      * Gemini APIに画像を送り、日付・金額・店名をJSONで読み取ってもらう
      * 戻り値：{ raw: 生のレスポンス文字列, parsed: { date, amount, vendor } }
+     *
+     * apiKey が指定されている場合（ローカル動作確認用）はブラウザから直接、
+     * 指定されていない場合（公開デモ用）は中継サーバー（/api/gemini）経由で呼び出す。
      */
     async function recognizeWithGemini(file, apiKey) {
       const { mimeType, data } = await fileToBase64(file);
 
-      const requestBody = {
+      if (apiKey) {
+        return recognizeWithGeminiDirect(mimeType, data, apiKey);
+      }
+      return recognizeWithGeminiProxy(mimeType, data);
+    }
+
+    /**
+     * Geminiに送るリクエスト内容を組み立てる（直接呼び出し用）
+     */
+    function buildGeminiRequestBody(mimeType, data) {
+      return {
         contents: [
           {
             parts: [
@@ -369,6 +390,15 @@
           },
         },
       };
+    }
+
+    /**
+     * 【ローカル動作確認用】ブラウザから直接Gemini APIを呼び出す
+     * ※このAPIキーはブラウザから直接送信される。デモ用の一時利用に限り、
+     *   第三者と共有したり公開ページに残したりしないこと。
+     */
+    async function recognizeWithGeminiDirect(mimeType, data, apiKey) {
+      const requestBody = buildGeminiRequestBody(mimeType, data);
 
       // 候補のモデルを上から順に試す。「モデルが見つからない（404）」場合のみ、
       // 次の候補に切り替える（それ以外のエラーは、その場で呼び出し元に伝える）。
@@ -399,6 +429,25 @@
       }
 
       throw lastError;
+    }
+
+    /**
+     * 【公開デモ用】中継サーバー（/api/gemini）経由でGemini APIを呼び出す
+     * APIキーはサーバー側（Vercelの環境変数）で管理されており、
+     * ブラウザからは渡さない。
+     */
+    async function recognizeWithGeminiProxy(mimeType, data) {
+      const response = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mimeType, data }),
+      });
+
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json?.error || `読み取りサーバーでエラーが発生しました（${response.status}）`);
+      }
+      return json;
     }
 
     // =================================================================
@@ -802,35 +851,39 @@
 
             <div className="p-4 space-y-3">
               {/* Gemini API（試験運用）の利用設定
-                  ※ gemini-config.js にキーが設定されている場合のみ表示する。
-                     お客様に共有する版（キー未設定）では、この項目自体が
-                     表示されず、これまでと同じシンプルな画面になる。 */}
-              {preconfiguredGeminiKey && (
-                <div className="border rounded-lg p-3 bg-gray-50 space-y-2">
-                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                  - gemini-config.js にキーが設定されている場合：ブラウザから
+                    直接Gemini APIを呼び出す（ローカル動作確認用）
+                  - キーが設定されていない場合：中継サーバー（/api/gemini）
+                    経由で呼び出す（公開デモ用。キー入力は不要） */}
+              <div className="border rounded-lg p-3 bg-gray-50 space-y-2">
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={useGemini}
+                    onChange={(e) => setUseGemini(e.target.checked)}
+                  />
+                  Gemini APIで読み取る（高精度・お試し用）
+                </label>
+                {useGemini && preconfiguredGeminiKey && (
+                  <div>
                     <input
-                      type="checkbox"
-                      checked={useGemini}
-                      onChange={(e) => setUseGemini(e.target.checked)}
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
+                      placeholder="Gemini APIキーを入力"
+                      className="border rounded px-2 py-1 text-sm w-full"
                     />
-                    Gemini APIで読み取る（高精度・お試し用）
-                  </label>
-                  {useGemini && (
-                    <div>
-                      <input
-                        type="password"
-                        value={geminiApiKey}
-                        onChange={(e) => handleGeminiApiKeyChange(e.target.value)}
-                        placeholder="Gemini APIキーを入力"
-                        className="border rounded px-2 py-1 text-sm w-full"
-                      />
-                      <p className="text-[10px] text-gray-400 mt-1">
-                        ※ gemini-config.js に設定済みのキーを使用しています。変更するとこのタブの間だけ上書きされます。
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      ※ gemini-config.js に設定済みのキーを使用しています。変更するとこのタブの間だけ上書きされます。
+                    </p>
+                  </div>
+                )}
+                {useGemini && !preconfiguredGeminiKey && (
+                  <p className="text-[10px] text-gray-400">
+                    ※ このデモではAPIキーの入力は不要です（中継サーバー経由で読み取ります）。
+                  </p>
+                )}
+              </div>
 
               {/* 撮影・画像選択ボタン（スマホではカメラが開く） */}
               <label

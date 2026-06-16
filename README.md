@@ -28,7 +28,9 @@
 全角数字や和暦（令和など）、レイアウトの違いにも強く、Tesseract.jsより
 高精度な読み取りが期待できます。
 
-### 使い方（事前にキーを設定しておく方式）
+呼び出し方法には2種類あり、`index.html` が自動で切り分けます。
+
+### A. 自分のPCで動作確認する（事前にキーを設定しておく方式）
 1. [Google AI Studio](https://aistudio.google.com/) でAPIキーを取得する
 2. `gemini-config.example.js` をコピーして、同じフォルダに
    `gemini-config.js` という名前で保存する
@@ -37,15 +39,22 @@
 4. `index.html` を開く（開き直す）と、「Gemini APIで読み取る」が自動でオンになり、
    キーを毎回入力せずに使えるようになります
 
-### 注意事項
+#### 注意事項
 - **APIキーが必要です**。利用量に応じて費用が発生する場合があります。
 - `gemini-config.js` は `.gitignore` に登録されているため、GitHubには
   アップロードされません。**`gemini-config.example.js` の方には、絶対に
   実際のキーを書き込まないでください**（こちらはアップロード対象です）。
 - 「レシートを追加」画面でチェックを外すと、いつでもTesseract.jsに戻せます。
 - ⚠️ この方法はAPIキーをブラウザから直接送信するため、**自分のPCで動作確認する
-  お試し用**に限定してください。お客様向けに本番提供する場合は、APIキーを隠す
-  ための中継サーバー（プロキシ）を別途用意する必要があります。
+  お試し用**に限定してください。
+
+### B. 公開したデモで、誰でもキー入力なしに使えるようにする（中継サーバー方式）
+`gemini-config.js` を設定していない状態で `index.html` を開くと、代わりに
+中継サーバー（`/api/gemini`）を経由してGemini APIを呼び出します。APIキーは
+サーバー側だけで管理されるため、訪問者にキーを入力させたり、キーを公開したり
+する必要がありません。
+
+設定方法は下記「[公開してGemini OCRを使えるようにする（Vercel）](#公開してgemini-ocrを使えるようにするvercel)」を参照してください。
 
 ## 注意事項
 - これは見た目・操作感を確認するための**デモ**です。
@@ -53,8 +62,37 @@
 - SwiftUI版（iPhoneアプリ）では、同じ考え方でVisionKit/Visionフレームワークを
   使って撮影・読み取りを行っています。
 
+## 公開してGemini OCRを使えるようにする（Vercel）
+このフォルダには `api/gemini.js` という中継サーバー（プロキシ）用のファイルが
+含まれています。これを [Vercel](https://vercel.com/)（無料のホスティング
+サービス）にアップロードすると、公開URLでアプリを誰でも開けるようになり、
+「Gemini APIで読み取る」もAPIキーの入力なしで使えるようになります。
+
+### 手順
+1. このフォルダ（`web-demo`）の中身をGitHubのリポジトリにアップロードする
+   （`gemini-config.js` は `.gitignore` により自動的に除外されます）
+2. [Vercel](https://vercel.com/) にアクセスし、GitHubアカウントでログインする
+3. 「Add New...」→「Project」から、1でアップロードしたリポジトリを選択して
+   インポートする（設定は変更せず「Deploy」を押してOKです）
+4. デプロイ完了後、Vercelの管理画面で「Settings」→「Environment Variables」
+   を開き、以下を追加する
+   - Key: `GEMINI_API_KEY`
+   - Value: [Google AI Studio](https://aistudio.google.com/) で取得したAPIキー
+5. 「Deployments」タブから最新のデプロイを「Redeploy」する
+   （環境変数は再デプロイ後に反映されます）
+6. 発行された公開URL（`https://〇〇.vercel.app`）を開き、「レシートを追加」→
+   「Gemini APIで読み取る」をチェックして動作確認する（キー入力欄は表示されません）
+
+### 運用上の注意
+- 公開URLにアクセスした人は誰でもGemini APIを使えるようになります。利用量に
+  応じて費用が発生するため、想定外の利用が心配な場合は[Google AI Studio](https://aistudio.google.com/)
+  またはGoogle Cloud Consoleの「APIキーの制限」「利用量の上限」設定で、
+  事前に上限を決めておくと安心です。
+- コードを更新してGitHubにpushすると、Vercel側にも自動的に反映されます。
+
 ## 今後Webアプリ化する場合
 このファイルはNext.js + Tailwind CSSへ移行する際の土台として使えます。
 - `theme` オブジェクト → `tailwind.config.js` の色設定
 - 各関数（`filterReceipts` など）→ そのままロジックとして移植可能
 - 各コンポーネント（`Header`, `FilterArea`, `ReceiptDetailModal` など）→ そのままコンポーネントファイルに分割
+- `api/gemini.js` → そのままNext.jsのAPI Route（`app/api/gemini/route.ts`）として移植可能

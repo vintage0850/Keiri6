@@ -1,2 +1,5 @@
 # Gemini APIキーなど、個人ごとの設定（GitHubにアップロードしない）
 gemini-config.js
+
+# Vercel CLIが作成するローカル設定（個人の環境ごとに異なるため）
+.vercel
