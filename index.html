@@ -12,7 +12,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <!-- Babel：下のJSXコード（HTMLっぽいJS）をブラウザ内で変換するための仕組み -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- バージョンを固定することで、CDN側のバージョンアップによる突然の動作不良を防ぐ -->
+  <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
   <!-- iOSのSafariでホーム画面に追加した場合のフルスクリーン表示 -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -34,7 +35,7 @@
 <body class="bg-gray-100">
   <div id="root"></div>
 
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react">
     const { useState, useMemo, useEffect, useRef } = React;
 
     // =================================================================
@@ -201,6 +202,40 @@
     // - APIキーはサーバー側（Vercelの環境変数 CLAUDE_API_KEY）で管理されており、
     //   ブラウザには一切渡さない。
     // =================================================================
+
+    /**
+     * 画像を長辺1200px以下にリサイズ＋コントラスト調整してOCR精度を上げる
+     * モバイルカメラの写真はそのままだと5MB以上になることがあり、APIの制限を超えるため圧縮する
+     */
+    function compressImage(file) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const MAX_PX = 1200;
+          let { width, height } = img;
+          if (width > MAX_PX || height > MAX_PX) {
+            const ratio = Math.min(MAX_PX / width, MAX_PX / height);
+            width = Math.round(width * ratio);
+            height = Math.round(height * ratio);
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          // コントラストと明るさを少し上げて、感熱紙など薄い文字を読みやすくする
+          ctx.filter = "contrast(1.2) brightness(1.05)";
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => resolve(new File([blob], "receipt.jpg", { type: "image/jpeg" })),
+            "image/jpeg",
+            0.85
+          );
+        };
+        img.src = url;
+      });
+    }
 
     /**
      * 画像ファイルを、サーバーへ送るための Base64 文字列に変換する
@@ -499,53 +534,31 @@
 
     // =================================================================
     // カメラのライブプレビューと撮影コンポーネント
-    // - getUserMedia API でカメラへのアクセス権限をブラウザが要求する
-    // - 許可されると背面カメラのライブ映像が表示され、撮影ボタンで静止画を取得する
-    // - 許可が拒否された場合や非対応ブラウザの場合はエラーメッセージを表示する
+    // - 親コンポーネント（AddReceiptModal）がボタンクリック時に getUserMedia を呼び、
+    //   取得した stream をこのコンポーネントに渡す。
+    // - iOSのSafariは「ユーザーが直接タップしたその場」でないとカメラを許可しないため、
+    //   useEffect（マウント後の非同期処理）ではなくボタンのクリックハンドラで呼ぶことが必須。
     // =================================================================
-    function CameraView({ onCapture, onClose }) {
+    function CameraView({ stream, onCapture, onClose }) {
       const videoRef = useRef(null);
-      // streamをrefで管理する（クリーンアップ時に確実にカメラを停止するため）
-      const streamRef = useRef(null);
-      const [cameraError, setCameraError] = useState("");
 
+      // 親から渡された stream を video タグにセットする
       useEffect(() => {
-        // getUserMedia に対応しているか確認する（Safari 11未満などでは非対応）
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          setCameraError("このブラウザはカメラ機能に対応していません。「画像を選ぶ」をご利用ください。");
-          return;
+        if (videoRef.current && stream) {
+          videoRef.current.srcObject = stream;
         }
-
-        // カメラへのアクセス権限を要求する（背面カメラを優先）
-        navigator.mediaDevices
-          .getUserMedia({ video: { facingMode: "environment" } })
-          .then((mediaStream) => {
-            streamRef.current = mediaStream;
-            if (videoRef.current) {
-              videoRef.current.srcObject = mediaStream;
-            }
-          })
-          .catch((err) => {
-            // 権限を拒否された場合
-            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-              setCameraError("カメラへのアクセスが許可されませんでした。Safariの設定からカメラを許可してください。");
-            } else {
-              setCameraError("カメラを開けませんでした。「画像を選ぶ」からレシートの写真を選んでください。");
-            }
-          });
-
         // コンポーネントが閉じられたときにカメラを停止する
         return () => {
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach((track) => track.stop());
+          if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
           }
         };
-      }, []);
+      }, [stream]);
 
       // カメラを止める共通処理
       function stopCamera() {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
         }
       }
 
@@ -571,20 +584,6 @@
       function handleClose() {
         stopCamera();
         onClose();
-      }
-
-      // カメラエラー時の表示
-      if (cameraError) {
-        return (
-          <div className="space-y-2">
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-xs text-red-600">{cameraError}</p>
-            </div>
-            <button onClick={onClose} className="w-full text-xs text-gray-400 underline">
-              閉じる
-            </button>
-          </div>
-        );
       }
 
       // ライブカメラ表示
@@ -631,6 +630,9 @@
       const [memo, setMemo] = useState("");
       const [recognizedLines, setRecognizedLines] = useState([]);
       const [showCamera, setShowCamera] = useState(false);
+      // カメラのstreamとエラーを親で管理する（iOSのジェスチャー起点制約のため）
+      const [cameraStream, setCameraStream] = useState(null);
+      const [cameraError, setCameraError] = useState("");
 
       // iOSのSafariでモーダルを開いている間、背景がスクロールしないようにする
       useEffect(() => {
@@ -654,7 +656,9 @@
 
         try {
           setOcrStatus("Claude AI で読み取り中…（数秒かかります）");
-          const { raw, parsed } = await recognizeWithClaude(file);
+          // 送信前に画像を圧縮してAPIの制限内に収める
+          const compressed = await compressImage(file);
+          const { raw, parsed } = await recognizeWithClaude(compressed);
           setRecognizedLines([raw]);
 
           if (parsed.date) setDate(parsed.date);
@@ -676,8 +680,33 @@
         }
       }
 
+      // 「カメラで撮影」ボタンを押したとき：ボタンのクリックイベント内で getUserMedia を呼ぶ
+      // iOSのSafariは「ユーザーの直接タップ」起点でないとカメラを許可しないため、
+      // useEffect ではなくここで呼ぶことが必須。
+      async function handleCameraOpen() {
+        setCameraError("");
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setCameraError("このブラウザはカメラに対応していません。「画像ファイルを選ぶ」をご利用ください。");
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+          setCameraStream(stream);
+          setShowCamera(true);
+        } catch (err) {
+          if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+            setCameraError("カメラの許可が必要です。ブラウザの設定からカメラを「許可」にしてください。");
+          } else if (err.name === "NotFoundError") {
+            setCameraError("カメラが見つかりません。「画像ファイルを選ぶ」をご利用ください。");
+          } else {
+            setCameraError(`カメラを開けませんでした（${err.name}）。「画像ファイルを選ぶ」をご利用ください。`);
+          }
+        }
+      }
+
       // CameraView で撮影した画像を受け取る
       function handleCameraCapture(file) {
+        setCameraStream(null);
         processFile(file);
       }
 
@@ -734,18 +763,25 @@
               {/* カメラ撮影 or ファイル選択 */}
               {showCamera ? (
                 <CameraView
+                  stream={cameraStream}
                   onCapture={handleCameraCapture}
-                  onClose={() => setShowCamera(false)}
+                  onClose={() => { setShowCamera(false); setCameraStream(null); }}
                 />
               ) : (
                 <>
-                  {/* カメラで撮影：権限ダイアログを出してライブ映像を表示する */}
+                  {/* カメラで撮影：ボタンのクリック時に直接 getUserMedia を呼ぶ（iOS対応） */}
                   <button
-                    onClick={() => setShowCamera(true)}
+                    onClick={handleCameraOpen}
                     className={`w-full py-3 rounded-lg text-sm font-medium ${theme.secondaryButton}`}
                   >
                     📷 カメラで撮影
                   </button>
+                  {/* カメラエラーの表示（許可拒否・非対応ブラウザなど） */}
+                  {cameraError && (
+                    <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                      <p className="text-xs text-red-600">{cameraError}</p>
+                    </div>
+                  )}
                   {/* 画像を選ぶ：端末内の写真ファイルを選択する */}
                   <label
                     htmlFor="receipt-photo-input"
