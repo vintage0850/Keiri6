@@ -15,11 +15,10 @@
 const CLAUDE_MODEL = "claude-sonnet-4-6";
 
 // Claude に送る指示文（日本語のレシートを想定）
-// 「JSON形式のみで回答」と明示することで、余分な説明文が混入するのを防ぐ。
+// 出力フォーマットは下記の extract_receipt_info ツール（Function Calling）側で
+// 強制するため、ここでは読み取りのポイントだけを伝える。
 const CLAUDE_PROMPT = `これは日本のレシートまたは領収書の画像です。
-次の3項目を読み取り、JSON形式のみで回答してください（前置きや説明は不要です）。
-
-{"date": "YYYY-MM-DD", "amount": 1200, "vendor": "店名"}
+extract_receipt_info ツールを使って、次の3項目を読み取ってください。
 
 読み取りのポイント：
 - date: 取引年月日。YYYY-MM-DD形式の文字列。
@@ -27,11 +26,45 @@ const CLAUDE_PROMPT = `これは日本のレシートまたは領収書の画像
   レシートは上部付近、領収書は「日付」「年月日」の横を確認する。
   読み取れない場合は null。
 - amount: 税込の最終支払金額。「合計」「お買上金額」「ご請求金額」の横の数字。
+  「小計」や「外税」など内訳の数字ではなく、最終的に支払った金額を選ぶこと。
   カンマ・円記号を除いた整数で返す。読み取れない場合は null。
 - vendor: 店名・会社名。レシート上部または領収書の「殿」の上に記載が多い。
   読み取れない場合は null。
 
-画像が暗い・文字が小さい場合でも、読み取れた範囲で必ずJSONを返すこと。`;
+具体例：
+- 「小計 980円／消費税 98円／合計 1,078円」と並んでいる場合
+  → amount は 1078（内訳の980や98ではなく、最終的な合計を選ぶ）
+- 「令和7年3月15日」と書かれている場合 → date は "2025-03-15"
+- レシート上部に住所や電話番号と一緒に店名が書かれている場合
+  → vendor は店名のみ（住所・電話番号・「TEL」などは含めない）
+
+画像が暗い・文字が小さい場合でも、読み取れた範囲で必ずツールを呼び出すこと。`;
+
+// Claude のツール定義（Function Calling）
+// JSON形式での回答を「お願い」するのではなく、スキーマで強制することで
+// マークダウンの混入や解析失敗（JSON.parseエラー）を構造的に防ぐ。
+const RECEIPT_TOOL = {
+  name: "extract_receipt_info",
+  description: "レシート・領収書の画像から日付・金額・店名を抽出する",
+  input_schema: {
+    type: "object",
+    properties: {
+      date: {
+        type: ["string", "null"],
+        description: "取引年月日。YYYY-MM-DD形式。読み取れない場合は null。",
+      },
+      amount: {
+        type: ["integer", "null"],
+        description: "税込の最終支払金額（整数）。読み取れない場合は null。",
+      },
+      vendor: {
+        type: ["string", "null"],
+        description: "店名・会社名。読み取れない場合は null。",
+      },
+    },
+    required: ["date", "amount", "vendor"],
+  },
+};
 
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
@@ -64,6 +97,9 @@ module.exports = async function handler(req, res) {
     body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: 256,
+      tools: [RECEIPT_TOOL],
+      // ツールを必ず呼び出させることで、回答が必ず構造化データになる
+      tool_choice: { type: "tool", name: "extract_receipt_info" },
       messages: [
         {
           role: "user",
@@ -92,21 +128,14 @@ module.exports = async function handler(req, res) {
   }
 
   const json = await response.json();
-  const text = json?.content?.[0]?.text;
-  if (!text) {
+  // ツール呼び出し（tool_use）ブロックから読み取り結果を取得する。
+  // テキストからJSONを抜き出す方式と違い、Claudeが必ずスキーマ通りの
+  // データを返すため、マークダウン混入や解析失敗が起こらない。
+  const toolUse = json?.content?.find((block) => block.type === "tool_use");
+  if (!toolUse?.input) {
     res.status(502).json({ error: "Claude AI から読み取り結果を取得できませんでした" });
     return;
   }
 
-  // Claude のレスポンスにマークダウンのコードブロック（```json ... ```）が
-  // 含まれることがあるため、取り除いてから JSON として解析する。
-  try {
-    const cleaned = text.replace(/```json?\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed = JSON.parse(cleaned);
-    res.status(200).json({ raw: text, parsed });
-  } catch (e) {
-    res.status(502).json({
-      error: `JSONの解析に失敗しました。Claude AIの回答：${text.slice(0, 100)}`,
-    });
-  }
+  res.status(200).json({ raw: JSON.stringify(toolUse.input), parsed: toolUse.input });
 };

@@ -307,6 +307,28 @@
       return json;
     }
 
+    /**
+     * 中継サーバー（/api/azure）経由で Azure Document Intelligence にレシートを読み取ってもらう
+     * - Azure の prebuilt-receipt モデルを使用（日付・金額・店名を自動抽出）
+     * - 解析は非同期のため、サーバー側でポーリングを行い結果を返す（数秒かかる）
+     * 戻り値：{ raw: 生のレスポンス文字列, parsed: { date, amount, vendor } }
+     */
+    async function recognizeWithAzure(file) {
+      const { data } = await fileToBase64(file);
+
+      const response = await fetch("/api/azure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data }),
+      });
+
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json?.error || `Azure Document Intelligence サーバーでエラーが発生しました（${response.status}）`);
+      }
+      return json;
+    }
+
     // =================================================================
     // 画面上部：タイトルと「レシートを追加」ボタン
     // =================================================================
@@ -667,6 +689,8 @@
       // カメラのstreamとエラーを親で管理する（iOSのジェスチャー起点制約のため）
       const [cameraStream, setCameraStream] = useState(null);
       const [cameraError, setCameraError] = useState("");
+      // OCR方式の選択（"claude": Claude AI / "azure": Azure Document Intelligence）
+      const [ocrMethod, setOcrMethod] = useState("claude");
 
       // iOSのSafariでモーダルを開いている間、背景がスクロールしないようにする
       useEffect(() => {
@@ -689,10 +713,13 @@
         setOcrStatus("読み取りの準備をしています…");
 
         try {
-          setOcrStatus("Claude AI で読み取り中…（数秒かかります）");
+          const methodLabel = ocrMethod === "azure" ? "Azure Document Intelligence" : "Claude AI";
+          setOcrStatus(`${methodLabel} で読み取り中…（数秒かかります）`);
           // 送信前に画像を圧縮してAPIの制限内に収める
           const compressed = await compressImage(file);
-          const { raw, parsed } = await recognizeWithClaude(compressed);
+          const { raw, parsed } = ocrMethod === "azure"
+            ? await recognizeWithAzure(compressed)
+            : await recognizeWithClaude(compressed);
           setRecognizedLines([raw]);
 
           if (parsed.date) setDate(parsed.date);
@@ -786,10 +813,30 @@
             </div>
 
             <div className="p-4 space-y-3">
-              {/* Claude AI 利用中の表示 */}
-              <div className="border rounded-lg p-3 bg-gray-50">
-                <p className="text-xs text-gray-600 font-medium">✓ Claude AI で高精度に読み取ります</p>
-                <p className="text-[10px] text-gray-400 mt-1">
+              {/* OCR方式の選択（Claude AI / Azure Document Intelligence） */}
+              <div className="border rounded-lg p-3 bg-gray-50 space-y-2">
+                <p className="text-xs text-gray-600 font-medium">読み取り方式を選んでください</p>
+                <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="ocrMethod"
+                    value="claude"
+                    checked={ocrMethod === "claude"}
+                    onChange={() => setOcrMethod("claude")}
+                  />
+                  Claude AI（Anthropic・高精度・日本語対応）
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="ocrMethod"
+                    value="azure"
+                    checked={ocrMethod === "azure"}
+                    onChange={() => setOcrMethod("azure")}
+                  />
+                  Azure Document Intelligence（Microsoft・帳票読み取り特化）
+                </label>
+                <p className="text-[10px] text-gray-400">
                   ※ APIキーはサーバー側で管理されているため、入力不要です。
                 </p>
               </div>

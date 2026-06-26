@@ -90,9 +90,51 @@
   事前に上限を決めておくと安心です。
 - コードを更新してGitHubにpushすると、Vercel側にも自動的に反映されます。
 
+## Azure Document Intelligence で読み取れるようにする
+
+このフォルダには `api/azure.js` という中継サーバー（プロキシ）用のファイルが含まれています。
+Microsoft Azure の帳票読み取りAI（prebuilt-receipt モデル）を使い、
+Claude AI と同等の精度でレシートの「日付・金額・店名」を自動読み取りできます。
+
+### 必要なもの
+- Microsoft Azure アカウント（個人用は無料プランあり）
+- Azure Document Intelligence リソース（以下の手順で作成）
+- エンドポイントURL と APIキー（リソース作成後に取得）
+
+### 手順
+
+#### A. Azure でリソースを作成する
+1. [Azure Portal](https://portal.azure.com/) にログインする
+2. 「リソースの作成」→「AIサービス」→「Document Intelligence」を検索して作成する
+   - リージョン：Japan East（東日本）を推奨
+   - 価格レベル：Free（F0）で月2000回まで無料
+3. 作成後、リソースの「キーとエンドポイント」ページを開き、以下をメモする
+   - **エンドポイント**（例: `https://your-resource.cognitiveservices.azure.com`）
+   - **キー1**（英数字の長い文字列）
+
+#### B. Vercel に公開してデモで使えるようにする
+1. このフォルダ（`web-demo`）の中身をGitHubのリポジトリにアップロードする
+2. [Vercel](https://vercel.com/) にアクセスし、GitHubアカウントでログインしてデプロイする
+3. デプロイ完了後、Vercelの管理画面で「Settings」→「Environment Variables」を開き、以下を追加する
+   - Key: `AZURE_DI_KEY` / Value: 上でメモした「キー1」
+   - Key: `AZURE_DI_ENDPOINT` / Value: 上でメモした「エンドポイント」
+4. 「Deployments」タブから最新のデプロイを「Redeploy」する
+5. 発行された公開URLを開き、「レシートを追加」→「Azure Document Intelligence」を選んで動作確認する
+
+### 動作の仕組み（参考）
+Azure Document Intelligence の解析は「依頼 → 待機 → 結果取得」の3ステップになっています。
+`api/azure.js` の中でこのポーリング処理を自動で行うため、
+呼び出す側（ブラウザ）はリクエストを1回送るだけで結果を受け取れます。
+
+### 運用上の注意
+- Free プラン（F0）は月2,000ページまで無料（1枚のレシートが1ページ）
+- 上限を超えた場合の料金は [Azure 価格ページ](https://azure.microsoft.com/ja-jp/pricing/details/ai-document-intelligence/) で確認できます
+
+---
+
 ## 今後Webアプリ化する場合
 このファイルはNext.js + Tailwind CSSへ移行する際の土台として使えます。
 - `theme` オブジェクト → `tailwind.config.js` の色設定
 - 各関数（`filterReceipts` など）→ そのままロジックとして移植可能
 - 各コンポーネント（`Header`, `FilterArea`, `ReceiptDetailModal` など）→ そのままコンポーネントファイルに分割
-- `api/gemini.js` → そのままNext.jsのAPI Route（`app/api/gemini/route.ts`）として移植可能
+- `api/gemini.js` / `api/claude.js` / `api/azure.js` → そのままNext.jsのAPI Route（`app/api/*/route.ts`）として移植可能
