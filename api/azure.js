@@ -3,8 +3,8 @@
 //
 // - ブラウザはAPIキーを持たず、この中継サーバーにだけ画像を送る。
 // - APIキーはVercelの環境変数（Settings > Environment Variables）で管理する：
-//     AZURE_DI_KEY      … Azure Document Intelligence のAPIキー
-//     AZURE_DI_ENDPOINT … Azure リソースのエンドポイントURL
+//     AZURE_DOCUMENT_INTELLIGENCE_KEY      … Azure Document Intelligence のAPIキー
+//     AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT … Azure リソースのエンドポイントURL
 //                         （例: https://your-resource.cognitiveservices.azure.com）
 // - Azure Document Intelligence は解析が非同期のため、
 //   「解析依頼（POST）→ 完了まで確認（ポーリング）→ 結果取得」の3ステップになる。
@@ -21,13 +21,13 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const apiKey = process.env.AZURE_DI_KEY;
-  const endpoint = process.env.AZURE_DI_ENDPOINT;
+  const apiKey = process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY;
+  const endpoint = process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT;
 
   if (!apiKey || !endpoint) {
     res.status(500).json({
       error:
-        "サーバー側に AZURE_DI_KEY または AZURE_DI_ENDPOINT が設定されていません（Vercelの環境変数を確認してください）",
+        "サーバー側に AZURE_DOCUMENT_INTELLIGENCE_KEY または AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT が設定されていません（Vercelの環境変数を確認してください）",
     });
     return;
   }
